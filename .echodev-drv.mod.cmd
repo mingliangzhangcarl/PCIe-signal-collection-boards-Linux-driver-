@@ -1,0 +1,1 @@
+cmd_/home/zml/workspace/qemu/pci-echodev-zml/echodev-drv.mod := printf '%s\n'   echodev-drv.o | awk '!x[$$0]++ { print("/home/zml/workspace/qemu/pci-echodev-zml/"$$0) }' > /home/zml/workspace/qemu/pci-echodev-zml/echodev-drv.mod

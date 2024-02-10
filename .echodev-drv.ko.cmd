@@ -1,0 +1,1 @@
+cmd_/home/zml/workspace/qemu/pci-echodev-zml/echodev-drv.ko := arm-linux-gnueabihf-ld -r  -EL -z noexecstack   --build-id=sha1  -T scripts/module.lds -o /home/zml/workspace/qemu/pci-echodev-zml/echodev-drv.ko /home/zml/workspace/qemu/pci-echodev-zml/echodev-drv.o /home/zml/workspace/qemu/pci-echodev-zml/echodev-drv.mod.o;  true
