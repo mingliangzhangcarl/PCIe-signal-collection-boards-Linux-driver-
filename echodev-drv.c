@@ -24,11 +24,14 @@
 #define DMA_RUN 1
 
 
-#define timeout_send_ms  	50
-#define timeout_process_ms 	105
-#define timeout_recv_ms  	10
+#define timeout_send_ms  		50
+#define timeout_process_ms 		105
+#define timeout_recv_ms  		10
 
-#define BUFFER_SIZE 1024
+#define TO_DEVICE_FRAME_LENGTH 	14
+#define SEND_BUFFER_SIZE    	14
+#define RECV_BUFFER_SIZE		4096
+#define DEVICE_BAR_SIZE			4096
 
 #define LOG_INFO(fmt, ...) pr_info("%s %s() line %d " fmt "\n", __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__)
 #define LOG_ERR(fmt, ...) pr_err("%s %s() line %d " fmt "\n", __FILE__, __FUNCTION__, __LINE__, ##__VA_ARGS__)
@@ -82,7 +85,6 @@ struct echo_dev {
 	void __iomem 			*ptr_bar0;
 	struct list_head 		list;
 	struct cdev 			cdev;
-    dev_t 					dev_nr;
 	int   					irq_nr;
 	struct control_cdev 	ctrl_cdev;
     struct event_cdev 		event_cdev;
@@ -162,6 +164,7 @@ static void work_handler(struct work_struct *work)
 	if (rv == 0 || engine_p->cur_state == FAILED || engine_p->cur_state == SENDING){
         LOG_ERR("data send failed rv = %d, cur_statue = %d", rv,engine_p->cur_state);
 		spin_unlock_irqrestore(&engine_p->state_lock, flags);
+		count = -1;
         goto failed;
     }
 	spin_unlock_irqrestore(&engine_p->state_lock, flags);
@@ -173,6 +176,7 @@ static void work_handler(struct work_struct *work)
 	if (rv == 0 || engine_p->cur_state == FAILED || engine_p->cur_state == PROCESSING){
 		LOG_ERR("process failed rv = %d, cur_statue = %d", rv,engine_p->cur_state);
 		spin_unlock_irqrestore(&engine_p->state_lock, flags);
+		count = -2;
         goto failed;
     }
 	spin_unlock_irqrestore(&engine_p->state_lock, flags);
@@ -190,6 +194,7 @@ static void work_handler(struct work_struct *work)
 	if (rv == 0 || engine_p->cur_state == FAILED || engine_p->cur_state == RECEIVING){
 		LOG_ERR("recv data error rv = %d, cur_statue = %d", rv,engine_p->cur_state);
 		spin_unlock_irqrestore(&engine_p->state_lock, flags);
+		count = -3;
         goto failed;
     }
 	spin_unlock_irqrestore(&engine_p->state_lock, flags);
@@ -207,88 +212,20 @@ static void work_handler(struct work_struct *work)
 	spin_unlock_irqrestore(&echo_p->event_cdev.event_lock, flags);
 	wake_up_interruptible(&echo_p->event_wq);
 	LOG_INFO("work finish");
-//  
-//     wait_event_interruptible_timeout(echo->event_wq,cur_task->cur_state != RECEIVING, msecs_to_jiffies(timeout_recv_ms));
-//     if (cur_task->cur_state == FAILED || cur_task->cur_state == PROCESSING){
-//         goto failed;
-//     }else{
-//     // step 7 : 
-//     LOG_INFO("finish cur_statue = %d",data->cur_state);
+	return;
 failed:
+	// step failed : free resource && set status && notify wake_wq
+	spin_lock_irqsave(&engine_p->state_lock, flags);
+	engine_p->cur_state = FAILED;
+	spin_unlock_irqrestore(&engine_p->state_lock, flags);
+
+	spin_lock_irqsave(&echo_p->event_cdev.event_lock, flags);
+	echo_p->event_cdev.event = count;
+	spin_unlock_irqrestore(&echo_p->event_cdev.event_lock, flags);
+	wake_up_interruptible(&echo_p->event_wq);
+	LOG_INFO("work failed error code = %d", count);
     return;
 }
-
-
-
-// static int task_process(struct echo_dev *echo)
-// {
-//     struct Task *cur_task = echo->cur_task;
-//     cur_task->cur_state = INITING;
-//     if ( !cur_task->send_buffer || !cur_task->send_count){
-// 		return -1;  
-//     }
-// 	printk("before = %x\n", cur_task->send_dma_addr);
-// 	cur_task->send_dma_addr = dma_map_single(&echo->pdev->dev, cur_task->send_buffer, cur_task->send_count, DMA_TO_DEVICE);
-// 	printk("after = %x\n", cur_task->send_dma_addr);
-// 	/* Setup the DMA controller */
-// 	iowrite32(cur_task->send_count, echo->ptr_bar0 + DMA_CNT);
-// 	iowrite32(cur_task->send_dma_addr, echo->ptr_bar0 + DMA_SRC);
-// 	iowrite32(0, echo->ptr_bar0 + DMA_DST);
-// 	/* Let's fire the dma */
-// 	iowrite32(DMA_RUN | DMA_TO_DEVICE, echo->ptr_bar0 + DMA_CMD);
-// 	cur_task->cur_state = SENDING;
-//     	// wait dma tran finish
-//     wait_event_interruptible_timeout(echo->event_wq,cur_task->cur_state != SENDING, msecs_to_jiffies(timeout_send_ms));
-//     if (cur_task->cur_state == FAILED || cur_task->cur_state == SENDING){
-//         goto failed;
-//     }
-// 	printk("send data finish\n");
-//     // free send buffer
-//     dma_unmap_single(&echo->pdev->dev, cur_task->send_dma_addr, cur_task->send_count, DMA_TO_DEVICE);
-//     kfree(cur_task->send_buffer);
-//     cur_task->send_dma_addr = 0;
-//     cur_task->send_buffer = 0;
-//     // fire the process
-// 	printk("fire to process\n"); 
-//     iowrite32(1, echo->ptr_bar0 + 0x32);
-//     cur_task->cur_state = PROCESSING;
-//     // wait process finish
-//     wait_event_interruptible_timeout(echo->event_wq,cur_task->cur_state != PROCESSING, msecs_to_jiffies(timeout_process_ms));
-//     if (cur_task->cur_state == FAILED || cur_task->cur_state == PROCESSING){
-//         goto failed;
-//     }
-// 	printk("PROCESSING finish\n");
-//     cur_task->recv_count = ioread32(echo->ptr_bar0 + DMA_CNT);
-// 	printk("device to host data length = %x\n",cur_task->recv_count);
-//     cur_task->recv_buffer = kmalloc(cur_task->recv_count, GFP_ATOMIC);
-//     cur_task->recv_dma_addr = dma_map_single(&echo->pdev->dev, cur_task->recv_buffer, cur_task->recv_count, DMA_FROM_DEVICE);
-//     	// config register
-// 	iowrite32(0, echo->ptr_bar0 + DMA_SRC);
-// 	iowrite32(cur_task->recv_dma_addr, echo->ptr_bar0 + DMA_DST);
-// 	/* Let's fire the dma */
-// 	iowrite32(DMA_RUN | DMA_FROM_DEVICE, echo->ptr_bar0 + DMA_CMD);
-//     cur_task->cur_state = RECEIVING;
-//     wait_event_interruptible_timeout(echo->event_wq,cur_task->cur_state != RECEIVING, msecs_to_jiffies(timeout_recv_ms));
-//     if (cur_task->cur_state == FAILED || cur_task->cur_state == PROCESSING){
-//         goto failed;
-//     }else{
-// 	printk("RECEIVING finish\n");
-//         cur_task->cur_state = RECEIVED;
-//     }
-//     return 0;
-// failed:
-//     printk("failed\n");
-//     cur_task->cur_state = FAILED;
-//     if (cur_task->send_dma_addr) 
-//         dma_unmap_single(&echo->pdev->dev, cur_task->send_dma_addr, cur_task->send_count, DMA_TO_DEVICE);
-//     if (cur_task->send_buffer)
-//         kfree(cur_task->send_buffer);
-//     if (cur_task->recv_dma_addr)
-//     	dma_unmap_single(&echo->pdev->dev, cur_task->recv_dma_addr, cur_task->recv_count, DMA_TO_DEVICE);
-//     if (cur_task->recv_buffer)
-//         kfree(cur_task->recv_buffer);
-// 	return -1;
-// }
 
 
 static int dma_transfer(struct echo_dev *echo, void *buffer, int count, dma_addr_t addr, enum dma_data_direction dir)
@@ -319,6 +256,7 @@ static int dma_transfer(struct echo_dev *echo, void *buffer, int count, dma_addr
 }
 void test(struct echo_dev* echo);
 
+
 static int control_cdev_open(struct inode *inode, struct file *file)
 {
     struct echo_dev *echo;  
@@ -329,7 +267,6 @@ static int control_cdev_open(struct inode *inode, struct file *file)
 		if(echo->ctrl_cdev.cdev_nr == dev_nr) {			
 			file->private_data = &echo->ctrl_cdev;
             mutex_unlock(&lock);
-			test(echo);
 			return 0;
 		}
 	}
@@ -347,7 +284,6 @@ static int event_cdev_open(struct inode *inode, struct file *file)
 		if(echo->event_cdev.cdev_nr == dev_nr) {			
 			file->private_data = &echo->event_cdev;
             mutex_unlock(&lock);
-			test(echo);
 			return 0;
 		}
 	}
@@ -447,19 +383,22 @@ static ssize_t control_cdev_write(struct file *file, const char __user *user_buf
 	/* wait_event_interruptible() was interrupted by a signal */
 	if (rv == -ERESTARTSYS)
 		return -ERESTARTSYS;
+	*offs += 14;
 	return 14;
 }
 
 static ssize_t control_cdev_read(struct file *file, char __user *user_buffer, size_t count, loff_t *offs)
 {
     unsigned long flags;
-    struct control_cdev *ctrl_cdev = (struct control_cdev *) file->private_data;    
+    struct control_cdev *ctrl_cdev = (struct control_cdev *) file->private_data;
+	int not_copied, to_copy = (count + *offs < RECV_BUFFER_SIZE) ? count : RECV_BUFFER_SIZE - *offs;
 	LOG_INFO("count = %d offs = %d", count,*offs);   
     spin_lock_irqsave(&ctrl_cdev->buffer_lock, flags);
-    copy_to_user(user_buffer, ctrl_cdev->buffer, count);
+	not_copied = copy_to_user(user_buffer, ctrl_cdev->buffer, to_copy);
     spin_unlock_irqrestore(&ctrl_cdev->buffer_lock, flags);
-	LOG_INFO("read finish");   
-    return count;
+	LOG_INFO("read finish");
+	*offs += to_copy - not_copied;
+    return to_copy - not_copied;
 }
 
 static int echo_open(struct inode *inode, struct file *file)
@@ -629,10 +568,10 @@ static long int echo_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 /*
  * character device file operations for echo_device
  */
-static loff_t echo_llseek(struct file *file, loff_t off, int whence)
+static loff_t control_cdev_llseek(struct file *file, loff_t off, int whence)
 {
 	loff_t newpos = 0;
-	printk("echo_llseek is called\n");
+	LOG_INFO("echo_llseek is called\n");
 	switch (whence) {
 	case 0: /* SEEK_SET */
 		newpos = off;
@@ -657,6 +596,7 @@ static struct file_operations control_cdev_fops = {
 	.open = control_cdev_open,
 	.write = control_cdev_write,
 	.read = control_cdev_read,
+	.llseek = control_cdev_llseek,
 	// .mmap = echo_mmap,
 	// .read = echo_read,
 	// .write = echo_write,
@@ -673,7 +613,7 @@ static struct file_operations event_cdev_fops = {
 	// .read = echo_read,
 	// .write = echo_write,
 	// .unlocked_ioctl = echo_ioctl,
-	// .llseek = echo_llseek,
+	
 };
 
 
@@ -719,7 +659,7 @@ static struct echo_dev* alloc_dev_instance(struct pci_dev *pdev)
     edev->ctrl_cdev.pedev = edev;
 	edev->ctrl_cdev.cdev.owner = THIS_MODULE;
 	cdev_init(&(edev->ctrl_cdev.cdev), &control_cdev_fops);
-	edev->ctrl_cdev.buffer = devm_kzalloc(&pdev->dev, 4096, GFP_KERNEL);
+	edev->ctrl_cdev.buffer = devm_kzalloc(&pdev->dev, RECV_BUFFER_SIZE, GFP_KERNEL);
     spin_lock_init(&(edev->ctrl_cdev.buffer_lock));
     // initialize echo_dev->event_cdev
     edev->event_cdev.pedev = edev;
@@ -730,9 +670,9 @@ static struct echo_dev* alloc_dev_instance(struct pci_dev *pdev)
     // initialize echo_dev->engine
     edev->engine.pedev = edev;
     edev->engine.cur_state = FINISH;
-	edev->engine.send_count = 14;
+	edev->engine.send_count = SEND_BUFFER_SIZE;
 	edev->engine.send_buffer = devm_kzalloc(&pdev->dev, edev->engine.send_count, GFP_KERNEL);
-	edev->engine.recv_count = 4096;
+	edev->engine.recv_count = DEVICE_BAR_SIZE;
 	edev->engine.recv_buffer = devm_kzalloc(&pdev->dev, edev->engine.recv_count, GFP_KERNEL);
 	edev->engine.send_dma_addr = dma_map_single(&edev->pdev->dev, edev->engine.send_buffer, edev->engine.send_count, DMA_TO_DEVICE);
 	edev->engine.recv_dma_addr = dma_map_single(&edev->pdev->dev, edev->engine.recv_buffer, edev->engine.recv_count, DMA_FROM_DEVICE);
@@ -742,6 +682,23 @@ static struct echo_dev* alloc_dev_instance(struct pci_dev *pdev)
     return edev;
 }
 
+
+
+static void free_dev_instance(struct echo_dev* edev)
+{
+    if (!edev) {
+		LOG_ERR("Invalid pdev");
+		return NULL;
+    }
+    // Because devm_kzalloc function be used, fewer resources need to be released manually
+    
+    // free echo_dev->engine
+	dma_unmap_single(&edev->pdev->dev, edev->engine.send_buffer, edev->engine.send_count, DMA_TO_DEVICE);
+	dma_unmap_single(&edev->pdev->dev, edev->engine.recv_buffer, edev->engine.recv_count, DMA_FROM_DEVICE);
+	// free echo_dev->event_cdev	Currently, no resources need to be manually released
+	// free echo_dev->ctrl_cdev		Currently, no resources need to be manually released
+	// free echo_dev				Currently, no resources need to be manually released
+}
 
 /*
  * 负责全局链表的维护
@@ -801,6 +758,24 @@ fdev:
 }
 
 
+static void echo_device_close(struct echo_dev *echo)
+{
+	if (!echo) {
+		LOG_ERR("Invalid pdev");
+		return;
+    }
+    struct pci_dev *pdev = echo->pdev;
+	pci_free_irq_vectors(pdev);
+	// Because I'm using the pcim_iomap function, I don't need to release it manually
+	// pci_iounmap(pdev, echo->ptr_bar0); // bug point
+	pci_disable_device(pdev);
+	// 维护全局链表
+	mutex_lock(&lock);
+	list_del(&echo->list);
+	mutex_unlock(&lock);
+    return;
+}
+
 /*
  * 负责创建用户接口 就是创建sysfs
  */
@@ -818,6 +793,24 @@ static int edev_create_interfaces(struct echo_dev *echo)
 		return status;
 	}
     return 0;
+}
+
+
+
+/*
+ * 
+ */
+static void edev_destroy_interfaces(struct echo_dev *echo)
+{
+	if (!echo) {
+		LOG_ERR("Invalid pdev");
+		return;
+    }
+	cdev_del(&(echo->ctrl_cdev.cdev));
+	LOG_INFO("Removing device with Device Number %d:%d",MAJOR(echo->ctrl_cdev.cdev_nr), MINOR(echo->ctrl_cdev.cdev_nr));
+	cdev_del(&(echo->event_cdev.cdev));
+	LOG_INFO("Removing device with Device Number %d:%d",MAJOR(echo->event_cdev.cdev_nr), MINOR(echo->event_cdev.cdev_nr));
+    return;
 }
 
 
@@ -907,13 +900,11 @@ fdev:
 static void echo_remove(struct pci_dev *pdev)
 {
 	struct echo_dev *echo = (struct echo_dev *) pci_get_drvdata(pdev);
-	printk("echo_dev-drv - Removing the device with Device Number %d:%d\n",
-	MAJOR(echo->dev_nr), MINOR(echo->dev_nr));
 	if(echo) {
-		mutex_lock(&lock);
-		list_del(&echo->list);
-		mutex_unlock(&lock);
-		cdev_del(&echo->cdev);
+		LOG_INFO("Removing the device with card id =  %d",echo->card_idx);
+		edev_destroy_interfaces(echo);
+		echo_device_close(echo);
+		free_dev_instance(echo);
 	}
 	pci_free_irq_vectors(pdev);
 }

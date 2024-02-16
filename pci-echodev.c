@@ -8,6 +8,7 @@
 #include "qemu/main-loop.h" /* iothread mutex */
 #include "qemu/module.h"
 #include "qapi/visitor.h"
+#include <unistd.h>
 
 #define TYPE_PCI_CUSTOM_DEVICE "pci-echodev"
 
@@ -19,11 +20,22 @@
 #define DMA_DST		   0x18
 #define DMA_CNT            0x20
 #define DMA_CMD            0x28
+#define PROCESS_REGISTER   0x32
+
+
+#define FRAME_LENGTH       	0xe
+#define FRAME_HEAD_OFF	   	0x0
+#define FRAME_TIME_OFF     	0x1
+#define FRAME_FRE_START_OFF 	0x5
+#define FRAME_FRE_END_OFF 	0x9
+#define FRAME_END_OFF     	0xd
 
 typedef struct PciechodevState PciechodevState;
 
 //This macro provides the instance type cast functions for a QOM type.
-DECLARE_INSTANCE_CHECKER(PciechodevState, PCIECHODEV, TYPE_PCI_CUSTOM_DEVICE)
+//DECLARE_INSTANCE_CHECKER(PciechodevState, PCIECHODEV, TYPE_PCI_CUSTOM_DEVICE)
+#define PCIECHODEV(obj) \
+        OBJECT_CHECK(PciechodevState, (obj), TYPE_PCI_CUSTOM_DEVICE)
 
 	//struct defining/descring the state
 	//of the custom pci device.
@@ -56,6 +68,78 @@ static int check_range(uint64_t addr, uint64_t cnt)
 	return 0;
 }
 
+
+static void start_process(PciechodevState *pciechodev, hwaddr addr, unsigned size){
+	pciechodev->bar0[PROCESS_REGISTER/4] = 0;    // clear
+	pciechodev->bar0[PROCESS_REGISTER/4] |= 0x01;// bits[1:0] = [0 1] 
+	for (hwaddr i = addr; i < addr+size;++i){
+		printf("PCIECHODEV - start_process - addr = %lx\tdata=%x\n",i,pciechodev->bar1[i]);
+	}
+
+	if (size != FRAME_LENGTH){
+		goto parsing_failure;
+	}
+	if (pciechodev->bar1[addr + FRAME_HEAD_OFF] != 0xaa){
+		printf("PCIECHODEV - start_process - head error\n");
+		goto parsing_failure;
+	}
+	if (pciechodev->bar1[addr + FRAME_END_OFF] != 0xee){
+		printf("PCIECHODEV - start_process - tail error\n");
+		goto parsing_failure;
+	}
+	uint32_t time;
+	uint32_t fre0,fre1;
+	uint32_t* ptr;
+	ptr = (uint32_t *) &pciechodev->bar1[addr + FRAME_TIME_OFF];
+	time = *ptr;
+	ptr = (uint32_t *) &pciechodev->bar1[addr + FRAME_FRE_START_OFF];
+        fre0 = *ptr;
+	ptr = (uint32_t *) &pciechodev->bar1[addr + FRAME_FRE_END_OFF];
+        fre1 = *ptr;
+	printf("time = %d\n", time);
+	printf("fre0 = %d\n", fre0);
+	printf("fre1 = %d\n", fre1);
+	if (time > 1000 || fre0 < 1e3 || fre1 > 6e3 || fre0 >= fre1){
+		printf("PCIECHODEV - start_process - range error\n");
+		goto parsing_failure;
+	}
+	uint8_t* uint8_ptr = (uint8_t*) &pciechodev->bar1[addr];
+	uint32_t count = rand() % 51 + 50; // [50,100]
+	for (int i = 0; i < count;++i){
+		*uint8_ptr = 0xbb;
+		uint8_ptr++;
+		ptr = (uint32_t*)uint8_ptr;
+		*ptr = rand() % time; // toa
+		ptr++;
+		*ptr = rand() % (fre1 - fre0 + 1) + fre0; // fre
+                ptr++;
+		*ptr = rand() % 200; // pw
+		ptr++;
+                uint8_ptr = (uint8_t*)ptr;
+		*uint8_ptr = 0xdd;
+		uint8_ptr++;
+	}
+	usleep(1000*time);
+	pciechodev->bar0[PROCESS_REGISTER/4] = 0;
+	pciechodev->bar0[PROCESS_REGISTER/4] = 0x3; // bit[3:0] = [0 0 1 1]
+	pciechodev->dma->cnt = count*14;
+	pciechodev->dma->dst = addr;
+	// pciechodev->bar0[IRQ_REGISTER] |= (1 << 1);
+	pciechodev->bar0[IRQ_REGISTER/4] = 2;
+	printf("pciechodev->bar0[IRQ_REGISTER]  == = %lx\n",pciechodev->bar0[IRQ_REGISTER]);
+	pci_set_irq(&pciechodev->pdev, 1);
+	return;
+	
+parsing_failure:
+	pciechodev->bar0[PROCESS_REGISTER/4] = 0;
+	pciechodev->bar0[PROCESS_REGISTER/4] |= 0x6; // set [3:0] = [0,1,1,0]
+	//pciechodev->bar0[IRQ_REGISTER] |= (1 << 1);
+	pciechodev->bar0[IRQ_REGISTER/4] = 2;	
+pci_set_irq(&pciechodev->pdev, 1);
+	return;
+}
+
+
 static void fire_dma(PciechodevState *pciechodev)
 {
 	struct dma_state *dma = pciechodev->dma;
@@ -83,13 +167,14 @@ static void fire_dma(PciechodevState *pciechodev)
 
 	dma->cmd &= ~(DMA_RUN);
 	dma->cmd |= (DMA_DONE);
+	pciechodev->bar0[IRQ_REGISTER/4] = 1;
+	pci_set_irq(&pciechodev->pdev, 1);
 }
 
 static uint64_t pciechodev_bar0_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
 	PciechodevState *pciechodev = opaque;
 	printf("PCIECHODEV: BAR0 pciechodev_mmio_read() addr %lx size %x \n", addr, size);
-
 	if(addr == RANDVAL_REGISTER)
 		return rand();
 
@@ -119,10 +204,18 @@ static void pciechodev_bar0_mmio_write(void *opaque, hwaddr addr, uint64_t val,
 				fire_dma(pciechodev);
 			break;
 		case IRQ_REGISTER:
-			if(val & 1)
+			if(val & 1){
 				pci_set_irq(&pciechodev->pdev, 1);
-			else if(val & 2)
+				pciechodev->bar0[addr/4] = 1;
+			}
+			if (val & 0xffffffff){
 				pci_set_irq(&pciechodev->pdev, 0);
+				printf("hello\n");
+				pciechodev->bar0[addr/4] = 0;
+			}
+			break;
+		case PROCESS_REGISTER:
+			if (val & 1) start_process(pciechodev,0,FRAME_LENGTH);
 			pciechodev->bar0[addr/4] = val;
 			break;
 		default:

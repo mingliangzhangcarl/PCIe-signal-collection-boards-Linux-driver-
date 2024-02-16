@@ -19,18 +19,13 @@
 pthread_mutex_t mutex;
 pthread_cond_t cond;
 int32_t count;
-void *fileReader(void *arg) {
-    char *filename = (char *)arg;
-    int fd = open(filename, O_RDWR);
-    if (!fd) {
-        perror("Error opening file");
-        pthread_exit(NULL);
-    }
+int event_fd;
 
+void *fileReader() {
     char buffer[4];
 
     while (1) {
-        read(fd, buffer,4);
+        read(event_fd, buffer,4);
         // 加锁
         pthread_mutex_lock(&mutex);
         // 将读取结果转发给主线程
@@ -43,7 +38,7 @@ void *fileReader(void *arg) {
         pthread_mutex_unlock(&mutex);
     }
 
-    fclose(fd);
+    fclose(event_fd);
     pthread_exit(NULL);
 }
 
@@ -65,6 +60,12 @@ int main(int argc, char **argv)
     pthread_cond_init(&cond, NULL);
 
     pthread_t thread;
+    event_fd = open(argv[2], O_RDWR);
+    if (!fd) {
+        perror("Error opening file");
+        pthread_exit(NULL);
+    }
+
     int ret = pthread_create(&thread, NULL, fileReader, argv[2]);
     if (ret) {
         perror("Error creating thread");
@@ -80,7 +81,12 @@ int main(int argc, char **argv)
     
 
     uint8_t databuf[FRAME_LENGTH] = { 0xaa, 0x64, 00, 00, 00, 0, 0x10, 00, 00, 0x10, 0x10, 00, 00, 0xee };
-
+    status = lseek(fd, 0, SEEK_SET);
+    if(status < 0){
+        printf("lseek_error error!\r\n");
+        close(fd);
+        return -1;
+    }
     status = write(fd, databuf, FRAME_LENGTH);
     if(status < 0){
         printf("write error!\r\n");
@@ -95,6 +101,12 @@ int main(int argc, char **argv)
     // 处理结果
     uint8_t* recv_buffer = malloc(count);
     memset(recv_buffer,0,count);
+    status = lseek(fd, 0, SEEK_SET);
+    if(status < 0){
+        printf("lseek_error error!\r\n");
+        close(fd);
+        return -1;
+    }
     status = read(fd, recv_buffer, count);
     if(status < 0){
         printf("read error!\r\n");
@@ -122,7 +134,6 @@ int main(int argc, char **argv)
 			i++;
 		}
 	}
-
 	// uint8_t* recv_buffer = malloc(1200);
 	// memset(recv_buffer,0,1200);
 	// status = lseek(fd, 0, SEEK_SET);
