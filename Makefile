@@ -1,6 +1,7 @@
 ARCH := arm
 CROSS_COMPILE :=arm-linux-gnueabihf-
 KERNELDIR := ../linux-6.1.58
+# KERNELDIR:=/lib/modules/$(shell uname -r)/build
 CURRENT_PATH := $(shell pwd)
 obj-m += echodev-drv.o
 
