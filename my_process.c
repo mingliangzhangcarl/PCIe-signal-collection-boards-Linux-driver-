@@ -12,8 +12,8 @@
 #include "echodev-cmd.h"
 
 
-#define FRAME_LENGTH       	0xe
-
+#define HOST_TO_DEVICE_FRAME_LENGTH       	0x13
+#define DEVICE_TO_HOST_FRAME_LENGTH       	0x15
 
 // 互斥锁和条件变量
 pthread_mutex_t mutex;
@@ -38,7 +38,7 @@ void *fileReader() {
         pthread_mutex_unlock(&mutex);
     }
 
-    fclose(event_fd);
+    close(event_fd);
     pthread_exit(NULL);
 }
 
@@ -61,7 +61,7 @@ int main(int argc, char **argv)
 
     pthread_t thread;
     event_fd = open(argv[2], O_RDWR);
-    if (!fd) {
+    if (!event_fd) {
         perror("Error opening file");
         pthread_exit(NULL);
     }
@@ -80,14 +80,20 @@ int main(int argc, char **argv)
 
     
 
-    uint8_t databuf[FRAME_LENGTH] = { 0xaa, 0x64, 00, 00, 00, 0, 0x10, 00, 00, 0x10, 0x10, 00, 00, 0xee };
+    uint8_t databuf[HOST_TO_DEVICE_FRAME_LENGTH] = { 0xaa, 
+                                        0x01,
+                                        0x64, 00, 00, 00, 
+                                        0, 0x10, 00, 00, 
+                                        0x10, 0x10, 00, 00,
+                                        00, 00,00,00,
+                                        0xee };
     status = lseek(fd, 0, SEEK_SET);
     if(status < 0){
         printf("lseek_error error!\r\n");
         close(fd);
         return -1;
     }
-    status = write(fd, databuf, FRAME_LENGTH);
+    status = write(fd, databuf, HOST_TO_DEVICE_FRAME_LENGTH);
     if(status < 0){
         printf("write error!\r\n");
         close(fd);
@@ -108,6 +114,7 @@ int main(int argc, char **argv)
         return -1;
     }
     status = read(fd, recv_buffer, count);
+    printf("read return status = %d\n",status);
     if(status < 0){
         printf("read error!\r\n");
         close(fd);
@@ -116,18 +123,25 @@ int main(int argc, char **argv)
     // 解锁
     pthread_mutex_unlock(&mutex);
     uint32_t i = 0;
-	uint32_t* ptr;
+	uint32_t* ptr32;
+    uint64_t* ptr64;
+    // for (int cnt = 0; cnt < count;++cnt){
+    //     printf("%d\n",recv_buffer[cnt]);
+    // }
 	while( i < status){
-		if (recv_buffer[i] == 0xbb && recv_buffer[i+FRAME_LENGTH - 1] == 0xdd){
-			i++;
-			ptr = (uint32_t*) &recv_buffer[i];
-			printf("toa = %d\t", *ptr);
+		if (recv_buffer[i] == 0xbb && recv_buffer[i+DEVICE_TO_HOST_FRAME_LENGTH - 1] == 0xdd){
+			i += 2;
+            uint16_t* id_p = (uint16_t*) &recv_buffer[i];
+            printf("id= %d\t", *id_p);
+            i+=2;
+			ptr64 = (uint64_t*) &recv_buffer[i];
+			printf("toa = %d\t", *ptr64);
+			i += 8;
+			ptr32 = (uint32_t*) &recv_buffer[i];
+			printf("cf =  %d\t", *ptr32);
 			i += 4;
-			ptr = (uint32_t*) &recv_buffer[i];
-			printf("cf =  %d\t", *ptr);
-			i += 4;
-			ptr = (uint32_t*) &recv_buffer[i];
-			printf("pw =  %d\t", *ptr);
+			ptr32 = (uint32_t*) &recv_buffer[i];
+			printf("pw =  %d\t", *ptr32);
 			i += 4;
 			printf("\n");
 		}else{

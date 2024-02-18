@@ -28,8 +28,8 @@
 #define timeout_process_ms 		105
 #define timeout_recv_ms  		10
 
-#define TO_DEVICE_FRAME_LENGTH 	14
-#define SEND_BUFFER_SIZE    	14
+#define TO_DEVICE_FRAME_LENGTH 	0x13
+#define SEND_BUFFER_SIZE    	0x13
 #define RECV_BUFFER_SIZE		4096
 #define DEVICE_BAR_SIZE			4096
 
@@ -51,7 +51,7 @@ struct control_cdev{
     dev_t 					cdev_nr;			/* character device major:minor */
     struct cdev 			cdev;			/* character device embedded struct */
     char* 					buffer;
-    // struct device 		*sys_device;	/* sysfs device */
+    struct device 		*sys_device;	/* sysfs device */
     spinlock_t 				buffer_lock;
 };
 
@@ -60,7 +60,7 @@ struct event_cdev{
     dev_t 					cdev_nr;			/* character device major:minor */
     struct cdev 			cdev;			/* character device embedded struct */
     int 					event;
-    // struct device 		*sys_device;	/* sysfs device */
+    struct device 		*sys_device;	/* sysfs device */
 	spinlock_t 				event_lock;
 };
 
@@ -94,12 +94,17 @@ struct echo_dev {
 	wait_queue_head_t 		event_wq;
 };
 
+/* Module Parameters */
+bool createFile = false;
+module_param(createFile, bool, false);
+MODULE_PARM_DESC(createFile, "Whether to automatically create the device file. If you select No, you need to create the file manually, default is no .");
+
 /* Global Variables */
 LIST_HEAD(card_list);
 static struct mutex lock;
 static int minor_count = 0;
 static int card_count = 0;
-
+static struct class *g_echo_class = NULL;
 
 static irqreturn_t echo_irq_handler(int irq_nr, void *data)
 {
@@ -343,12 +348,12 @@ static ssize_t control_cdev_write(struct file *file, const char __user *user_buf
     struct echo_dev* echo = ctrl_cdev->pedev;
     LOG_INFO("into control_cdev_write function\n");
     LOG_INFO("check count\n");
-    if (count != 14){
-        LOG_INFO("into control_cdev_write function count != 14 \n");
+    if (count != TO_DEVICE_FRAME_LENGTH){
+        LOG_INFO("into control_cdev_write function count != %d \n",TO_DEVICE_FRAME_LENGTH);
 	    return -EPROTO;
     }
 
-
+	LOG_INFO("ptr = %x", offs);
 	LOG_INFO("check offs\n");
     if (*offs != 0){
         LOG_ERR("into control_cdev_write function  *offs != 0 \n");
@@ -383,18 +388,23 @@ static ssize_t control_cdev_write(struct file *file, const char __user *user_buf
 	/* wait_event_interruptible() was interrupted by a signal */
 	if (rv == -ERESTARTSYS)
 		return -ERESTARTSYS;
-	*offs += 14;
-	return 14;
+	*offs += TO_DEVICE_FRAME_LENGTH;
+	return TO_DEVICE_FRAME_LENGTH;
 }
 
 static ssize_t control_cdev_read(struct file *file, char __user *user_buffer, size_t count, loff_t *offs)
 {
     unsigned long flags;
     struct control_cdev *ctrl_cdev = (struct control_cdev *) file->private_data;
+	// *offs = 0;
+	LOG_INFO("ptr = %x", offs);
+	LOG_INFO("file->f_pos = %u", file->f_pos);
+	LOG_INFO("count = %u offs = %u", count,*offs);
 	int not_copied, to_copy = (count + *offs < RECV_BUFFER_SIZE) ? count : RECV_BUFFER_SIZE - *offs;
-	LOG_INFO("count = %d offs = %d", count,*offs);   
+	LOG_INFO("count = %u offs = %u", count,*offs);   
     spin_lock_irqsave(&ctrl_cdev->buffer_lock, flags);
 	not_copied = copy_to_user(user_buffer, ctrl_cdev->buffer, to_copy);
+	copy_to_user(user_buffer, ctrl_cdev->buffer, count);
     spin_unlock_irqrestore(&ctrl_cdev->buffer_lock, flags);
 	LOG_INFO("read finish");
 	*offs += to_copy - not_copied;
@@ -444,27 +454,34 @@ static int echo_open(struct inode *inode, struct file *file)
 
 void test(struct echo_dev* echo)
 {
-	int send_count = 14;
+	int send_count = TO_DEVICE_FRAME_LENGTH;
     char *send_buf = kzalloc(send_count, GFP_ATOMIC);
 	LOG_INFO("test start");
 	send_buf[0] = 0xaa;
 
-	send_buf[1] = 0x64; 
-	send_buf[2] = 00; 
-	send_buf[3] = 00;
+	send_buf[1] = 0x01;
+
+	send_buf[2] = 0x64; 
+	send_buf[3] = 00; 
 	send_buf[4] = 00;
-
 	send_buf[5] = 00;
-	send_buf[6] = 0x10;
-	send_buf[7] = 00;
+
+	send_buf[6] = 00;
+	send_buf[7] = 0x10;
 	send_buf[8] = 00;
+	send_buf[9] = 00;
 
-	send_buf[9] = 0x10;
 	send_buf[10] = 0x10;
-	send_buf[11] = 00;
+	send_buf[11] = 0x10;
 	send_buf[12] = 00;
+	send_buf[13] = 00;
 
-	send_buf[13] = 0xee;
+	send_buf[14] = 0;
+	send_buf[15] = 0;
+	send_buf[16] = 0;
+	send_buf[17] = 0;
+
+	send_buf[18] = 0xee;
 
 	dma_transfer(echo, send_buf, send_count,0, DMA_TO_DEVICE);
 	kfree(send_buf);
@@ -571,7 +588,7 @@ static long int echo_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 static loff_t control_cdev_llseek(struct file *file, loff_t off, int whence)
 {
 	loff_t newpos = 0;
-	LOG_INFO("echo_llseek is called\n");
+	LOG_INFO("echo_llseek is called old off = %d new off%d\n",file->f_pos,off);
 	switch (whence) {
 	case 0: /* SEEK_SET */
 		newpos = off;
@@ -587,6 +604,7 @@ static loff_t control_cdev_llseek(struct file *file, loff_t off, int whence)
 	}
 	if (newpos < 0)
 		return -EINVAL;
+	LOG_INFO("echo_llseek is called newpos = %d",newpos);
 	file->f_pos = newpos;
 	return newpos;
 }
@@ -792,6 +810,10 @@ static int edev_create_interfaces(struct echo_dev *echo)
 		LOG_ERR("card %d - Error adding event cdev", echo->card_idx);
 		return status;
 	}
+	if (g_echo_class){
+		echo->ctrl_cdev.sys_device = device_create(g_echo_class, NULL,echo->ctrl_cdev.cdev_nr, "echo-ctrl%d", echo->card_idx);
+		echo->event_cdev.sys_device = device_create(g_echo_class, NULL,echo->event_cdev.cdev_nr, "echo-event%d", echo->card_idx);
+	}
     return 0;
 }
 
@@ -806,6 +828,10 @@ static void edev_destroy_interfaces(struct echo_dev *echo)
 		LOG_ERR("Invalid pdev");
 		return;
     }
+	if (g_echo_class){
+		device_destroy(g_echo_class,echo->ctrl_cdev.cdev_nr);
+		device_destroy(g_echo_class,echo->event_cdev.cdev_nr);
+	}
 	cdev_del(&(echo->ctrl_cdev.cdev));
 	LOG_INFO("Removing device with Device Number %d:%d",MAJOR(echo->ctrl_cdev.cdev_nr), MINOR(echo->ctrl_cdev.cdev_nr));
 	cdev_del(&(echo->event_cdev.cdev));
@@ -920,7 +946,7 @@ static int __init echo_init(void)
 {
 	int status;
 	dev_t dev_nr = MKDEV(DEVNR, 0);
-
+	LOG_INFO("createFile = %d", createFile);
 	status = register_chrdev_region(dev_nr, MINORMASK + 1, DEVNRNAME);
 	if(status < 0) {
 		LOG_ERR("echo_dev-drv - Error registering Device numbers");
@@ -928,19 +954,31 @@ static int __init echo_init(void)
 	}
 
 	mutex_init(&lock);
-
+	if (createFile){
+		g_echo_class = class_create(THIS_MODULE, DEVNRNAME);
+		if (IS_ERR(g_echo_class)){
+			LOG_ERR("failed to create class");
+			return PTR_ERR(g_echo_class);
+		}
+	}else{
+		g_echo_class = NULL;
+	}
 	status = pci_register_driver(&echo_driver);
 	if(status < 0) {
 		LOG_ERR("echo_dev-drv - Error registering driver");
 		unregister_chrdev_region(dev_nr, MINORMASK + 1);
 		return status;
 	}
+
 	return 0;
 }
 
 static void __exit echo_exit(void)
 {
 	dev_t dev_nr = MKDEV(DEVNR, 0);
+	if (createFile){
+		class_destroy(g_echo_class);
+	}
 	unregister_chrdev_region(dev_nr, MINORMASK + 1);
 	pci_unregister_driver(&echo_driver);
 }
